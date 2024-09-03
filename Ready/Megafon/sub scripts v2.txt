@@ -1,0 +1,1020 @@
+--СОБИРАЕМ КАЖДУЮ ПОДПИСКУ АБОНЕНТА НА КАЖДОМ СЕРВИС-КОДЕ, ОПРЕДЕЛЯЕМ КАНАЛЫ, ВЫДЕЛЯЕМ ПРИЗНАКИ МИГРАЦИИ
+
+truncate table rep_b2b.sc_sub_flow2
+;
+
+insert into /*+ NO_STATEMENT_QUEUING PARALLEL(8) */ rep_b2b.sc_sub_flow2
+
+with 
+evnt as
+(
+select /*+ NO_STATEMENT_QUEUING PARALLEL(8) */  
+    --sk_subs_id, 
+    coalesce( --когда sk_subs_id в момент подписки пустой, берём sk_subs_id из отписки
+    sk_subs_id, 
+    case 
+      when typename = 'subscribe' then lead(sk_subs_id) over (partition by msisdn, vasp_serv_id order by event_dttm asc, typename asc)
+    end
+    ) as sk_subs_id,
+    subs_subs_id,
+    to_number(msisdn) as msisdn,
+    service_code,
+    vasp_serv_id,
+    typename,
+    event_dttm as subscribe_dttm, --обозвал заранее, будет соответствовать названию при соотв тайпнейме сабскрайм
+CASE
+        when service_code like '%retail%' or (channel_name = 'kc' and login like 'retail%') 
+             then 'Ритейл'
+        when service_code in (select service_code from nw_dev.is_service_code where ORGANIC = '100%')
+             then 'Органика'
+        when channel_name='ussd'
+                  and ssc_short_number in 
+                  ('208','213','214','218','232','238','239','240','242','243','245','247','248',
+                  '251','253','261','262','266','267','273','274','280','305','315','411','441',
+                  '259','563','521','31','106','455','481','278','703','803','805','254','230',
+                  '125','230','338','980','701','632','182','270','125','302','340','190','401','320',
+                  '197', '194', '293', '387', '386' --на этой строке от 05.04.2023
+           ) then 'dstk (100)'
+        when channel_name = 'kc'
+             then 'Колл центр'
+        when channel_name = 'cc_sms' and SERVICE_CODE  not like '%retail%' 
+             then 'ЦО_смс'
+        when vasp_cd like '%3dgame-center%'  or vasp_cd like '%hezzl%' --везде где cd_value = 'hezzl01' vasp_cd like '%hezzl%', но наоборот - нет
+          or cd_value1 like '%revgames%' --если пусто, но есть в vasp_cd, то проходит по vasp_cd like '%3dgame-center%'
+          or cd_value2 = 'игра в млк (партнерство hezzle)'   
+          or cd_value8 = 'game-center' 
+          or vasp_cd like '%3dgame-center%' 
+          or vasp_cd like '%revgames%'                          
+             then 'Игра (ЛК)' --Игры чек на 08.12.2022 за весь 2022, позже должна появиться квантрера, её надо будет прописать
+        when cd_value5 = 'stories' --cd_value4 in ('mlk', 'lk')
+             then 'Stories'
+        when cd_value8 = 'superoffer' 
+             then 'Супер-оффер'
+        when cd_value8 = 'po-carousel' 
+             then 'Карусель'
+        when cd_value8 = 'cp' or cd_value1 = '10' 
+             then 'ЦП_(услуги)'
+        when cd_value8 = 'cp-look' 
+             then 'раздел «Посмотри»'
+        when cd_value8 = 'cp-listen' 
+             then 'раздел «Послушай»'
+        when cd_value8 = 'cp-play' 
+             then 'раздел «Поиграй»'
+        when cd_value8 = 'cp-read' 
+             then 'раздел «Почитай»' 
+        when cd_value8 = 'cp-helpful' 
+             then 'раздел «Полезное»' 
+        when cd_value8 = 'cp-recommended' 
+             then 'раздел «Рекомендуем»'
+        when cd_value8 = 'cp-onlinestore' 
+             then 'раздел «Интернет-магазин»'
+        when cd_value8 = 'cp-promoblock' 
+             then 'Промоблок-услуги'
+        when cd_value8 = 'cp-supersubscriptions'
+             then 'раздел «Суперподписки»'
+        when cd_value8 = 'smart-protection' 
+             then 'Умная защита'
+        when cd_value8 = 'po-personaloffer' 
+          or cd_value5 = 'pers_offers'
+             then 'Персональный оффер' 
+        when cd_value8 = 'cp-games'
+             then 'раздел «Игры»'
+        when cd_value8 = 'cp-music_and_books'
+             then 'раздел «Музыка и книги»'
+        when cd_value4 = 'megafontv%22' 
+             then 'Migr' --много для start_migr_14 и start_migr_21
+        when cd_value1 = '1' 
+             then 'ЛК партнера'
+        when cd_value1 = '3'
+          or VASP_TRANSACT_ID like 'rkn%' --???
+             then 'РКН'
+        when cd_value1 = '4' 
+             then 'РКН 2.0 (Фишинговые сайты)'
+        when cd_value1 = '5' 
+             then 'МегаБаннер'
+        when cd_value1 = '11'
+             then 'IVR (NN)'
+        when cd_value1 = '12' 
+             then 'IVR (JA)'
+        when cd_value1 in ('13', 'квинт')
+             then 'IVR (KV)'
+        when cd_value4 = 'elena-cvm' 
+             then 'Елена'
+        when cd_value1 = '7' 
+             then 'RTB'
+        when cd_value1 = '8' 
+             then '404'
+        when cd_value1 = '9' 
+             then 'ЦП_Web'
+        when cd_value4 like 'rfc%' --перебивает OSA ниже, подробности там же
+             then 'Технический оптаут'
+        when cd_value1 = '14' 
+             then 'OSA' --замечено cd_value4 like '%rfc%' для start_for_archive и yandexplus299_repriced, поэтому написал выше
+        when cd_value1 = '15' 
+             then 'MF TV' --мб объединить с 'Migr'?
+        when cd_value1 = '16' 
+             then 'OnlineZoneML'  
+        when cd_value1 in ('2', '17', 'лк', 'млк') or cd_value4 = 'lk-cvm' or channel_name = 'lk' --это убивается подробностями о разделе, которые выше, нужно выбрать или сделать два столбца
+             then 'ЛК' 
+        when vasp_cd = 'sms' or cd_value4 like '%sms%' or cd_value5 like '%sms%'
+             then 'sms' --для happysms15
+        when cd_value1 = 'webcc'
+             then 'webcc'
+        when cd_value1 = 'ussd'
+             then 'ussd'
+        when cd_value4 = 'rk_email'
+             then 'Email'
+        when cd_value1 = '6' 
+          or cd_value1 = 'landing' 
+          or cd_value8 = 'landing' 
+             then 'Landing page'
+        when cd_value1 = 'start'
+             then 'start'
+        when vasp_transact_id like 'arboost_landing%' 
+             then 'arboost_landing'
+        when channel_name = 'push' 
+             then 'dstk-push'
+        when service_code like '%yandex%cpa%' 
+             then 'cpa_voice'
+        else channel_name
+    end as activate_channel,
+    case 
+        when typename = 'subscribe' then lead(event_dttm) over (partition by sk_subs_id, vasp_serv_id order by event_dttm asc, typename asc) 
+    end as unsubscribe_dttm
+from 
+    rep_b2b.is_vasp_snap 
+Where typename in ('subscribe', 'unsubscribe')
+and service_code <> 'litres_pbc' --отдельно, это покупка книги
+)
+,
+
+lst as
+(
+select distinct
+  service,
+  service_zont,
+  partner,
+  partner2,
+  service_code 
+from 
+  nw_dev.is_service_code
+Where service_code is not null
+)
+
+select /*+ NO_STATEMENT_QUEUING PARALLEL(8) */
+    'VASP' as source,
+    s_sub.sk_subs_id,
+    s_sub.subs_subs_id,
+    s_sub.msisdn,
+    service,
+    service_zont,
+    partner,
+    partner2,
+    s_sub.service_code,
+    vasp_serv_id,
+    case 
+      when (trunc(s_sub.start_date, 'mm')<'01.05.2022' or activate_channel = 'api') and VASP_CHANNEL is not null then VASP_CHANNEL
+      when COALESCE(clc1.response_channel, clc2.response_channel) is not null and activate_channel = 'api' then COALESCE(clc1.response_channel, clc2.response_channel)
+      else activate_channel
+    end as activate_channel,
+    COALESCE(clc1.response_channel, clc2.response_channel) as CVM_CHANNEL,
+    COALESCE(clc1.UC_JOB_ID, clc2.UC_JOB_ID) as UC_JOB_ID,
+    clc2.COMMUNICATION_ID,
+    clc2.run_id,
+    COALESCE(clc1.collateral_id, clc2.collateral_id) as collateral_id,
+    clc1.collateral_ver,
+    s_sub.start_date,
+    s_sub.end_date,
+    MGD,
+    WMG,
+    SUM( --получаю идентификатор для совокупности связанных подписок у абонента внутри сурса
+       case 
+            when mgd is null then 1 
+            else 0
+       end
+       ) over(partition by s_sub.sk_subs_id order by service, partner, end_date, start_date asc) as idx
+from
+    (
+    Select 
+        sk_subs_id, 
+        subs_subs_id,
+        msisdn,
+        service,
+        service_zont,
+        partner,
+        partner2,
+        det.service_code, 
+        vasp_serv_id,  
+        activate_channel,
+        CASE 
+          when abs((subscribe_dttm-(lag(unsubscribe_dttm) over (partition by service, partner, sk_subs_id order by unsubscribe_dttm)))*24*60*60)<=6 
+          and service <> 'Викторины' --мол у викторин нет миграций
+            then 1 else null 
+        end as MGD,
+        Case
+          when abs(((lead(subscribe_dttm) over (partition by service, partner, sk_subs_id order by unsubscribe_dttm))-unsubscribe_dttm)*24*60*60)<=6 
+          and service <> 'Викторины' --мол у викторин нет миграций
+            then 1 else null 
+        end as WMG,
+        subscribe_dttm as start_date, 
+        COALESCE(unsubscribe_dttm, to_date('31.12.2999', 'dd.mm.yyyy')) as end_date
+    from
+        evnt det
+    left join
+        lst
+    on det.service_code=lst.service_code
+    Where typename = 'subscribe' --чтобы в lead(dttm) оказались unsubscribe
+    and (subscribe_dttm<>unsubscribe_dttm or unsubscribe_dttm is null) --убираем дубли с events
+    ) s_sub
+left join --тянем каналы с мопса для мегафон плюса и эпла
+    (
+    select distinct 
+        creation_date,
+        VASP_CHANNEL,
+        sk_subs_id,
+        service_code   
+    from  
+        PUB_DS.S_OMS_ORDERS_KHD k 
+    join 
+        rep_b2b.d_oms_channel c
+    on k.channel = c.channel
+    join 
+        rep_b2b.d_oms_product p
+    on p.PRODUCT_OFFERING_ID = k.PRODUCT_OFFERING_ID and p.partner in ('МегаФон','Apple')
+    where ACTION = 'NEW' and  ORDER_STATE = 'COMPLETED'
+    ) ch --тут 14 дублей, но пофиг
+on  s_sub.sk_subs_id = ch.sk_subs_id and s_sub.service_code  = ch.service_code and abs(s_sub.start_date-cast(ch.creation_date as date))<=0.0007 and trunc(s_sub.start_date, 'mm')<= '01.05.2022'
+left join -- подпираем данные из АС CVM по кампаниям и каналам подключения CVM, в случае API на pub_ds.f_vasp_events_v беру у них
+     cvm_ds.f_rtim_gen_response clc1
+on s_sub.sk_subs_id = clc1.sk_subs_id and abs(s_sub.start_date-clc1.response_dttm)<=0.0007 and s_sub.vasp_serv_id = clc1.basic_prod_id --and s_sub.activate_channel = 'api'
+left join 
+     cvm_ds.f_cim_gen_response clc2
+on s_sub.sk_subs_id = clc2.sk_subs_id and abs(s_sub.start_date-clc2.response_dttm)<=0.0007 and s_sub.vasp_serv_id = clc2.basic_prod_id --and s_sub.activate_channel = 'api'
+union all --биллинг
+select /*+ NO_STATEMENT_QUEUING PARALLEL(8) */ 
+    'BILLING' as source,
+    null as sk_subs_id,
+    b.subs_subs_id,
+    null as msisdn,
+    lst.service,
+    lst.service_zont,
+    lst.partner,
+    partner2,
+    b.service_code,
+    null as vasp_serv_id,
+    activate_channel,
+    COALESCE(clc1.response_channel, clc2.response_channel) as CVM_CHANNEL,
+    COALESCE(clc1.UC_JOB_ID, clc2.UC_JOB_ID) as UC_JOB_ID,
+    clc2.COMMUNICATION_ID,
+    clc2.run_id,
+    COALESCE(clc1.collateral_id, clc2.collateral_id) as collateral_id,
+    clc1.collateral_ver,
+    start_date,
+    end_date,
+    null as MGD,
+    null as WMG,
+    row_number() over(partition by b.subs_subs_id order by end_date asc) as idx -- миграций нет, поэтому просто пронумировывая подпискиу абонента
+from 
+    rep_b2b.ash_bil_pack b
+left join
+     lst
+on lst.service_code = b.service_code
+left join --аналогично тому, что выше
+     cvm_ds.f_rtim_gen_response clc1
+on b.subs_subs_id = clc1.subs_subs_id and clc1.billing_filial_id = 10 and abs(b.start_date-clc1.response_dttm)<=0.0007 and b.service_code = clc1.basic_prod_id --and s_sub.activate_channel = 'api'
+left join 
+     cvm_ds.f_cim_gen_response clc2
+on b.subs_subs_id = clc2.subs_subs_id and clc1.billing_filial_id = 10 and abs(b.start_date-clc2.response_dttm)<=0.0007 and b.service_code = clc2.basic_prod_id --and s_sub.activate_channel = 'api'
+union all --книги отдельно, поскольку покупка ломает связанность подписок
+select /*+ NO_STATEMENT_QUEUING PARALLEL(8) */ 
+    'VASP' as SOURCE,
+    sk_subs_id,
+    subs_subs_id,
+    to_number(msisdn) as msisdn,
+    'МегаФон Книги' as service,
+    'МегаФон Книги' as service_zont,
+    'Литрес' as partner,
+    'Литрес' as partner2,
+    service_code,
+    vasp_serv_id,
+    'Органика' as activate_channel,
+    null as cvm_channel,
+    null as UC_JOB_ID,
+    null as communication_id,
+    null as run_id,
+    null as collateral_id,
+    null as collateral_ver,
+    event_dttm as start_date,
+    event_dttm as end_date,
+    null as mgd,
+    null as wmg,
+    -row_number() over(partition by sk_subs_id order by event_dttm asc) as idx --отрицательный идентификатор, чтобы он не совпадал с другими на pub_ds.f_vasp_events_v
+from 
+    rep_b2b.is_vasp_snap 
+Where typename = 'subscribe'
+and service_code = 'litres_pbc'
+;
+
+commit
+;
+
+drop table rep_b2b.sub_flow3 purge
+;
+
+Create table rep_b2b.sub_flow3
+(
+idx number,
+SOURCE VARCHAR(7),
+SK_SUBS_ID NUMBER,
+SUBS_SUBS_ID NUMBER,
+MSISDN NUMBER,
+SERVICE VARCHAR(50),
+SERVICE_ZONT VARCHAR(50),
+PARTNER VARCHAR(50),
+PARTNER2 VARCHAR(50),
+SERVICE_CODE VARCHAR(50),
+VASP_SERV_ID NUMBER,
+ACTIVATE_CHANNEL VARCHAR(50), 
+CVM_CHANNEL VARCHAR(50),
+UC_JOB_ID NUMBER,
+COMMUNICATION_ID VARCHAR2(12),
+RUN_ID VARCHAR2(12),
+COLLATERAL_ID VARCHAR2(12),
+COLLATERAL_VER VARCHAR2(12),
+START_DATE DATE,
+END_DATE DATE,
+MGD NUMBER,
+WMG NUMBER,
+F_SERVICE_CODE VARCHAR(50),
+F_VASP_SERV_ID NUMBER,
+F_ACTIVATE_CHANNEL VARCHAR(50),
+F_START_DATE DATE,
+F_END_DATE DATE,
+PART_DATE DATE
+)
+PARTITION BY RANGE (PART_DATE) INTERVAL (NUMTOYMINTERVAL(1, 'MONTH'))
+  /*SUBPARTITION BY LIST (PARTNER)
+  SUBPARTITION TEMPLATE 
+  ( 
+      SUBPARTITION p1 VALUES ('Исет Софтвеа'),
+      SUBPARTITION p2 VALUES ('Mubert Inc'),
+      SUBPARTITION p3 VALUES ('ОМА (ВООМ)'),
+      SUBPARTITION p4 VALUES ('MyPrivacy'),
+      SUBPARTITION p5 VALUES ('Мамба'),
+      SUBPARTITION p6 VALUES ('Велнес Дижитал Групп'),
+      SUBPARTITION p7 VALUES ('ИМТ'),
+      SUBPARTITION p8 VALUES ('ЛайфСтрим'),
+      SUBPARTITION p9 VALUES ('Quantum'),
+      SUBPARTITION p10 VALUES ('Геймлофт'),
+      SUBPARTITION p11 VALUES ('Инфопартнер'),
+      SUBPARTITION p12 VALUES ('Зайцев.нет'),
+      SUBPARTITION p13 VALUES ('Мобильная Периодика'),
+      SUBPARTITION p14 VALUES ('В Контакте'),
+      SUBPARTITION p15 VALUES ('OZON'),
+      SUBPARTITION p16 VALUES ('Мобикон'),
+      SUBPARTITION p17 VALUES ('Boku, Inc'),
+      SUBPARTITION p18 VALUES ('Книгма'),
+      SUBPARTITION p19 VALUES ('Apple'),
+      SUBPARTITION p20 VALUES ('Мейл.Ру (Combo)'),
+      SUBPARTITION p21 VALUES ('Tinder'),
+      SUBPARTITION p22 VALUES ('Литрес'),
+      SUBPARTITION p23 VALUES ('Звук'),
+      SUBPARTITION p24 VALUES ('Deezer'),
+      SUBPARTITION p25 VALUES ('СОФТ ПРОГРАММ'),
+      SUBPARTITION p26 VALUES ('Медоблако'),
+      SUBPARTITION p27 VALUES ('Арбуст'),
+      SUBPARTITION p28 VALUES ('IVI'),
+      SUBPARTITION p29 VALUES ('Премьер'),
+      SUBPARTITION p30 VALUES ('Bemobi International AS'),
+      SUBPARTITION p31 VALUES ('MyBook'),
+      SUBPARTITION p32 VALUES ('Кидс 360'),
+      SUBPARTITION p33 VALUES ('Всемь Групп'),
+      SUBPARTITION p34 VALUES ('МегаФон'),
+      SUBPARTITION p35 VALUES ('Касперский'),
+      SUBPARTITION p36 VALUES ('АрБуст'),
+      SUBPARTITION p37 VALUES ('Blizzard'),
+      SUBPARTITION p38 VALUES ('АдвМьюзик'),
+      SUBPARTITION p39 VALUES ('ДМ'),
+      SUBPARTITION p40 VALUES ('Okko'),
+      SUBPARTITION p41 VALUES ('Генеральные мобильные технологии'),
+      SUBPARTITION p42 VALUES ('Квантера'),
+      SUBPARTITION p43 VALUES ('Рефрэш'),
+      SUBPARTITION p44 VALUES ('Регион Эстейт'),
+      SUBPARTITION p45 VALUES ('Линкит Восток'),
+      SUBPARTITION p46 VALUES ('Яндекс'),
+      SUBPARTITION p47 VALUES ('Старт.Ру'),
+      SUBPARTITION p48 VALUES ('Мейл.Ру'),
+      SUBPARTITION p49 VALUES ('izi Distribution Services BV'),
+      SUBPARTITION p50 VALUES ('ИД Бурда'),
+      subpartition pnull values (NULL),
+      SUBPARTITION pxxx VALUES (DEFAULT)
+  ) */
+  (
+  PARTITION less_rev_2018 VALUES LESS THAN (to_date('01.01.2018')),
+  PARTITION less_rev_2019 VALUES LESS THAN (to_date('01.01.2019')),
+  PARTITION less_rev_2020 VALUES LESS THAN (to_date('01.01.2020')),
+  PARTITION less_rev_2021 VALUES LESS THAN (to_date('01.01.2021')),
+  PARTITION less_rev_2022 VALUES LESS THAN (to_date('01.01.2022'))
+  COLUMN STORE COMPRESS FOR QUERY HIGH NO ROW LEVEL LOCKING 
+  )
+  PARALLEL 8 
+/*  (
+  PARTITION p0 VALUES LESS THAN (DATE'2018-01-01')
+  COLUMN STORE COMPRESS FOR QUERY HIGH NO ROW LEVEL LOCKING 
+  )*/
+;
+--первый прогруз sub_flow3, инсёрт завершённых до текущего месяца включительно + отдельно незавершённых
+truncate table rep_b2b.sub_flow3
+;
+
+declare v_date date
+;
+
+begin
+v_date:= date '2018-01-01'
+;
+
+while v_date <= date '2023-04-01' loop
+
+insert into /*+ NO_STATEMENT_QUEUING PARALLEL(8) */ rep_b2b.sub_flow3
+
+select
+    t.*,
+    trunc(f_end_date, 'mm') as PART_DATE
+    --to_date('01.12.2999', 'dd.mm.yyyy') as PART_DATE
+    --case when trunc(f_end_date, 'dd')>=trunc(sysdate,'dd') then to_date('01.12.2999', 'dd.mm.yyyy') else trunc(f_end_date, 'mm') end as PART_DATE 
+from 
+(
+select
+        idx, 
+        source, 
+        sk_subs_id, 
+        subs_subs_id, 
+        MSISDN,
+        SERVICE,
+        SERVICE_ZONT,
+        partner, 
+        partner2, 
+        service_code, 
+        vasp_serv_id, 
+        activate_channel, 
+        cvm_channel,
+        CASE WHEN SOURCE = 'VASP' then first_value(UC_JOB_ID) over (partition by source, idx, sk_subs_id order by start_date asc) else UC_JOB_ID end as UC_JOB_ID,
+        CASE WHEN SOURCE = 'VASP' then first_value(COMMUNICATION_ID) over (partition by source, idx, sk_subs_id order by start_date asc) else COMMUNICATION_ID end as COMMUNICATION_ID,
+        CASE WHEN SOURCE = 'VASP' then first_value(RUN_ID) over (partition by source, idx, sk_subs_id order by start_date asc) else RUN_ID end as RUN_ID,
+        CASE WHEN SOURCE = 'VASP' then first_value(COLLATERAL_ID) over (partition by source, idx, sk_subs_id order by start_date asc) else COLLATERAL_ID end as COLLATERAL_ID,
+        CASE WHEN SOURCE = 'VASP' then first_value(COLLATERAL_VER) over (partition by source, idx, sk_subs_id order by start_date asc) else  COLLATERAL_VER end as COLLATERAL_VER,
+        start_date,
+        end_date,
+        mgd,
+        wmg,
+        CASE WHEN SOURCE = 'VASP' then first_value(service_code) over (partition by source, idx, sk_subs_id order by start_date asc) else service_code end as f_service_code,
+        CASE WHEN SOURCE = 'VASP' then first_value(vasp_serv_id) over (partition by source, idx, sk_subs_id order by start_date asc) else vasp_serv_id end as f_vasp_serv_id,
+        CASE WHEN SOURCE = 'VASP' then first_value(activate_channel) over (partition by source, idx, sk_subs_id order by start_date asc) else activate_channel end as f_activate_channel,
+        CASE WHEN SOURCE = 'VASP' then min(start_date) over (partition by source, idx, sk_subs_id) else start_date end as f_start_date,
+        CASE WHEN SOURCE = 'VASP' then max(end_date) over (partition by source, idx, sk_subs_id) else end_date end as f_end_date
+from rep_b2b.sc_sub_flow2
+) t
+Where trunc(f_end_date, 'mm') = v_date
+;
+
+commit
+;
+  
+v_date:= add_months(v_date, 1)
+;
+
+end loop
+;
+
+end
+; 
+--update sub_flow3
+delete from rep_b2b.sub_flow3
+Where PART_DATE >= trunc(trunc(sysdate, 'dd')-4, 'mm') and trunc(f_end_date, 'dd') >= trunc(sysdate, 'dd')-4
+;
+
+commit
+;
+
+insert into /*+ NO_STATEMENT_QUEUING PARALLEL(8) */ rep_b2b.sub_flow3
+
+select
+    t.*,
+    case when trunc(f_end_date, 'dd')>trunc(sysdate,'dd') then to_date('01.12.2999', 'dd.mm.yyyy') else trunc(f_end_date, 'mm') end as PART_DATE 
+from 
+    (
+    select
+        idx, 
+        source, 
+        sk_subs_id, 
+        subs_subs_id, 
+        MSISDN,
+        SERVICE,
+        SERVICE_ZONT,
+        partner, 
+        partner2, 
+        service_code, 
+        vasp_serv_id, 
+        activate_channel, 
+        cvm_channel,
+        CASE WHEN SOURCE = 'VASP' then first_value(UC_JOB_ID) over (partition by source, idx, sk_subs_id order by start_date asc) else UC_JOB_ID end as UC_JOB_ID,
+        CASE WHEN SOURCE = 'VASP' then first_value(COMMUNICATION_ID) over (partition by source, idx, sk_subs_id order by start_date asc) else COMMUNICATION_ID end as COMMUNICATION_ID,
+        CASE WHEN SOURCE = 'VASP' then first_value(RUN_ID) over (partition by source, idx, sk_subs_id order by start_date asc) else RUN_ID end as RUN_ID,
+        CASE WHEN SOURCE = 'VASP' then first_value(COLLATERAL_ID) over (partition by source, idx, sk_subs_id order by start_date asc) else COLLATERAL_ID end as COLLATERAL_ID,
+        CASE WHEN SOURCE = 'VASP' then first_value(COLLATERAL_VER) over (partition by source, idx, sk_subs_id order by start_date asc) else  COLLATERAL_VER end as COLLATERAL_VER,
+        start_date,
+        end_date,
+        mgd,
+        wmg,
+        CASE WHEN SOURCE = 'VASP' then first_value(service_code) over (partition by source, idx, sk_subs_id order by start_date asc) else service_code end as f_service_code,
+        CASE WHEN SOURCE = 'VASP' then first_value(vasp_serv_id) over (partition by source, idx, sk_subs_id order by start_date asc) else vasp_serv_id end as f_vasp_serv_id,
+        CASE WHEN SOURCE = 'VASP' then first_value(activate_channel) over (partition by source, idx, sk_subs_id order by start_date asc) else activate_channel end as f_activate_channel,
+        CASE WHEN SOURCE = 'VASP' then min(start_date) over (partition by source, idx, sk_subs_id) else start_date end as f_start_date,
+        CASE WHEN SOURCE = 'VASP' then max(end_date) over (partition by source, idx, sk_subs_id) else end_date end as f_end_date
+    from rep_b2b.sc_sub_flow2
+    ) t
+Where trunc(f_end_date, 'mm') >= trunc(trunc(sysdate, 'dd')-4, 'mm') and trunc(f_end_date, 'dd') >= trunc(sysdate, 'dd')-4
+;
+
+commit
+;
+--конец sub_flow3
+drop table rep_b2b.aggr_sub_flow_monthly_idx3 purge
+;
+
+Create table rep_b2b.aggr_sub_flow_monthly_idx3
+(
+idx NUMBER,
+SOURCE VARCHAR(7),
+MNTH DATE,
+SK_SUBS_ID NUMBER,
+SUBS_SUBS_ID NUMBER,
+MSISDN NUMBER,
+SERVICE VARCHAR(50),
+SERVICE_ZONT VARCHAR(50),
+PARTNER VARCHAR(50),
+PARTNER2 VARCHAR(50),
+SERVICE_CODE VARCHAR(50),
+VASP_SERV_ID VARCHAR(50),
+ACTIVATE_CHANNEL VARCHAR(50), 
+CVM_CHANNEL VARCHAR(50),
+UC_JOB_ID NUMBER,
+COMMUNICATION_ID VARCHAR2(12),
+RUN_ID VARCHAR2(12),
+COLLATERAL_ID VARCHAR2(12),
+COLLATERAL_VER VARCHAR2(12),
+START_DATE DATE,
+END_DATE DATE,
+MGD NUMBER,
+WMG NUMBER,
+REVENUE NUMBER,
+MNTH_FIRST_PAY DATE,
+F_MNTH_FIRST_PAY DATE,
+F_ACTIVATE_CHANNEL VARCHAR(50),
+F_SERVICE_CODE VARCHAR(50),
+F_VASP_SERV_ID VARCHAR(50),
+F_START_DATE DATE,
+F_END_DATE DATE,
+SELL NUMBER,
+part_date date
+)
+PARTITION BY RANGE (MNTH) INTERVAL (NUMTOYMINTERVAL(1, 'MONTH'))
+  /*SUBPARTITION BY LIST (PARTNER)
+  SUBPARTITION TEMPLATE 
+  ( 
+      SUBPARTITION p1 VALUES ('Исет Софтвеа'),
+      SUBPARTITION p2 VALUES ('Mubert Inc'),
+      SUBPARTITION p3 VALUES ('ОМА (ВООМ)'),
+      SUBPARTITION p4 VALUES ('MyPrivacy'),
+      SUBPARTITION p5 VALUES ('Мамба'),
+      SUBPARTITION p6 VALUES ('Велнес Дижитал Групп'),
+      SUBPARTITION p7 VALUES ('ИМТ'),
+      SUBPARTITION p8 VALUES ('ЛайфСтрим'),
+      SUBPARTITION p9 VALUES ('Quantum'),
+      SUBPARTITION p10 VALUES ('Геймлофт'),
+      SUBPARTITION p11 VALUES ('Инфопартнер'),
+      SUBPARTITION p12 VALUES ('Зайцев.нет'),
+      SUBPARTITION p13 VALUES ('Мобильная Периодика'),
+      SUBPARTITION p14 VALUES ('В Контакте'),
+      SUBPARTITION p15 VALUES ('OZON'),
+      SUBPARTITION p16 VALUES ('Мобикон'),
+      SUBPARTITION p17 VALUES ('Boku, Inc'),
+      SUBPARTITION p18 VALUES ('Книгма'),
+      SUBPARTITION p19 VALUES ('Apple'),
+      SUBPARTITION p20 VALUES ('Мейл.Ру (Combo)'),
+      SUBPARTITION p21 VALUES ('Tinder'),
+      SUBPARTITION p22 VALUES ('Литрес'),
+      SUBPARTITION p23 VALUES ('Звук'),
+      SUBPARTITION p24 VALUES ('Deezer'),
+      SUBPARTITION p25 VALUES ('СОФТ ПРОГРАММ'),
+      SUBPARTITION p26 VALUES ('Медоблако'),
+      SUBPARTITION p27 VALUES ('Арбуст'),
+      SUBPARTITION p28 VALUES ('IVI'),
+      SUBPARTITION p29 VALUES ('Премьер'),
+      SUBPARTITION p30 VALUES ('Bemobi International AS'),
+      SUBPARTITION p31 VALUES ('MyBook'),
+      SUBPARTITION p32 VALUES ('Кидс 360'),
+      SUBPARTITION p33 VALUES ('Всемь Групп'),
+      SUBPARTITION p34 VALUES ('МегаФон'),
+      SUBPARTITION p35 VALUES ('Касперский'),
+      SUBPARTITION p36 VALUES ('АрБуст'),
+      SUBPARTITION p37 VALUES ('Blizzard'),
+      SUBPARTITION p38 VALUES ('АдвМьюзик'),
+      SUBPARTITION p39 VALUES ('ДМ'),
+      SUBPARTITION p40 VALUES ('Okko'),
+      SUBPARTITION p41 VALUES ('Генеральные мобильные технологии'),
+      SUBPARTITION p42 VALUES ('Квантера'),
+      SUBPARTITION p43 VALUES ('Рефрэш'),
+      SUBPARTITION p44 VALUES ('Регион Эстейт'),
+      SUBPARTITION p45 VALUES ('Линкит Восток'),
+      SUBPARTITION p46 VALUES ('Яндекс'),
+      SUBPARTITION p47 VALUES ('Старт.Ру'),
+      SUBPARTITION p48 VALUES ('Мейл.Ру'),
+      SUBPARTITION p49 VALUES ('izi Distribution Services BV'),
+      SUBPARTITION p50 VALUES ('ИД Бурда'),
+      subpartition pnull values (NULL),
+      SUBPARTITION pxxx VALUES (DEFAULT)
+  ) */
+ (
+  PARTITION less_rev_2018 VALUES LESS THAN (to_date('01.01.2018'))--,
+  --PARTITION less_rev_2019 VALUES LESS THAN (to_date('01.01.2019')),
+  --PARTITION less_rev_2020 VALUES LESS THAN (to_date('01.01.2020')),
+  --PARTITION less_rev_2021 VALUES LESS THAN (to_date('01.01.2021')),
+  --PARTITION less_rev_2022 VALUES LESS THAN (to_date('01.01.2022'))
+  COLUMN STORE COMPRESS FOR QUERY HIGH NO ROW LEVEL LOCKING 
+  )
+  PARALLEL 8 
+;
+
+--первый пролив
+declare v_date date
+;
+
+begin
+v_date:= date '2018-01-01'
+;
+
+while v_date <= date '2023-04-01' loop
+
+insert /*+ NO_STATEMENT_QUEUING PARALLEL(8) */ into rep_b2b.aggr_sub_flow_monthly_idx3
+
+Select
+    idx,
+    SOURCE,
+    mnth,
+    sk_subs_id,
+    subs_subs_id,
+    msisdn,
+    service,
+    service_zont,
+    partner,
+    partner2,
+    service_code,
+    vasp_serv_id,
+    activate_channel,
+    cvm_channel,
+    UC_JOB_ID,
+    COMMUNICATION_ID,
+    RUN_ID,
+    COLLATERAL_ID,
+    COLLATERAL_VER,
+    start_date,
+    end_date,
+    mgd,
+    wmg,
+    SUM(case when service = 'Викторины' and activate_channel = 'dstk-push' then 0 else cost_less_vat end) as REVENUE,
+    MNTH_FIRST_PAY,
+    F_MNTH_FIRST_PAY,
+    f_activate_channel,
+    f_service_code,
+    f_vasp_serv_id,
+    f_start_date,
+    f_end_date,
+    case 
+      when mnth=trunc(f_start_date, 'mm')
+        and MGD is null
+        then 1 
+        else null 
+          end as sell,
+    part_date
+from
+    (
+    Select 
+        idx, 
+        source, 
+        mnth,
+        s.sk_subs_id, 
+        s.subs_subs_id, 
+        MSISDN,
+        SERVICE,
+        SERVICE_ZONT,
+        partner, 
+        partner2, 
+        s.service_code, 
+        vasp_serv_id, 
+        activate_channel, 
+        cvm_channel,
+        UC_JOB_ID,
+        COMMUNICATION_ID,
+        RUN_ID,
+        COLLATERAL_ID,
+        COLLATERAL_VER,
+        start_date,
+        end_date,
+        mgd,
+        wmg,
+        coalesce(rev.event_dttm, revb.event_dttm) as event_dttm,
+        coalesce(rev.cost_less_vat, revb.cost_less_vat) as cost_less_vat,
+        MIN(COALESCE(rev.event_dttm, revb.event_dttm)) over (partition by source, idx, COALESCE(s.sk_subs_id, s.subs_subs_id), s.service_code, start_date) as MNTH_FIRST_PAY,
+        MIN(COALESCE(rev.event_dttm, revb.event_dttm)) over (partition by source, idx, COALESCE(s.sk_subs_id, s.subs_subs_id)) as F_MNTH_FIRST_PAY,
+        f_activate_channel,
+        f_service_code,
+        f_vasp_serv_id,
+        f_start_date,
+        f_end_date,
+        part_date
+    from 
+        (
+        select * 
+        from 
+               rep_b2b.sub_flow3 
+        Where part_date >= v_date and v_date between trunc(start_date, 'mm') and trunc(end_date, 'mm')
+        ) s
+    inner join
+        (
+        select distinct 
+               month_start_date as mnth 
+        from 
+               pub_ds.d_calendar
+        Where month_start_date = v_date --month_start_date between '01.01.2018' and trunc(sysdate, 'mm') 
+        ) c
+      on c.mnth>=trunc(s.start_date, 'mm') and c.mnth<=trunc(s.end_date, 'mm')
+    left join
+        (
+        select 
+            sk_subs_id, 
+            service_code, 
+            event_dttm, 
+            cost_less_vat 
+        from 
+            rep_b2b.is_vasp_snap 
+        Where typename in ('subscribe', 'prolong')
+        and cost_less_vat>0
+        and trunc(snap_date, 'mm') = v_date
+        ) rev
+      on s.sk_subs_id = rev.sk_subs_id and s.service_code = rev.service_code and rev.event_dttm between s.start_date and s.end_date and s.SOURCE = 'VASP' and trunc(rev.event_dttm, 'mm') = c.mnth
+    left join 
+        (
+        select 
+            call_date as event_dttm,
+            subs_subs_id,
+            service_code,
+            revenue as cost_less_vat
+        from 
+            rep_b2b.ash_bil_calls
+        Where revenue>0
+        and trunc(call_date, 'mm') = v_date
+        ) revb
+      on s.subs_subs_id = revb.subs_subs_id and s.service_code = revb.service_code and revb.event_dttm between trunc(s.start_date, 'dd') and trunc(s.end_date, 'dd') and s.SOURCE = 'BILLING' and trunc(revb.event_dttm, 'mm') = c.mnth
+    )
+Group by
+    idx,
+    SOURCE,
+    mnth,
+    sk_subs_id,
+    subs_subs_id,
+    msisdn,
+    service,
+    service_zont,
+    partner,
+    partner2,
+    service_code,
+    vasp_serv_id,
+    activate_channel,
+    cvm_channel,
+    UC_JOB_ID,
+    COMMUNICATION_ID,
+    RUN_ID,
+    COLLATERAL_ID,
+    COLLATERAL_VER,
+    start_date,
+    end_date,
+    mgd,
+    wmg,
+    MNTH_FIRST_PAY,
+    F_MNTH_FIRST_PAY,
+    f_activate_channel,
+    f_service_code,
+    f_vasp_serv_id,
+    f_start_date,
+    f_end_date,
+    case 
+      when mnth=trunc(f_start_date, 'mm')
+        and MGD is null
+        then 1 
+        else null 
+          end,
+    part_date
+;
+
+commit
+;
+
+v_date:= add_months(v_date, 1)
+;
+
+end loop
+;
+
+end
+;
+--update
+delete /*+ NO_STATEMENT_QUEUING PARALLEL(8) */ from rep_b2b.aggr_sub_flow_monthly_idx3
+where part_date >= trunc(trunc(sysdate, 'dd')-5, 'mm') and  trunc(f_end_date, 'dd') >= trunc(sysdate, 'dd')-5
+;
+
+commit
+;
+
+declare v_date date
+;
+
+begin
+v_date:= date '2018-01-01'
+;
+
+while v_date <= date '2023-04-01' loop --поменять на месяц sysdate
+
+insert /*+ NO_STATEMENT_QUEUING PARALLEL(8) */ into rep_b2b.aggr_sub_flow_monthly_idx3
+
+Select
+    idx,
+    SOURCE,
+    mnth,
+    sk_subs_id,
+    subs_subs_id,
+    msisdn,
+    service,
+    service_zont,
+    partner,
+    partner2,
+    service_code,
+    vasp_serv_id,
+    activate_channel,
+    cvm_channel,
+    UC_JOB_ID,
+    COMMUNICATION_ID,
+    RUN_ID,
+    COLLATERAL_ID,
+    COLLATERAL_VER,
+    start_date,
+    end_date,
+    mgd,
+    wmg,
+    SUM(case when service = 'Викторины' and activate_channel = 'dstk-push' then 0 else cost_less_vat end) as REVENUE,
+    MNTH_FIRST_PAY,
+    F_MNTH_FIRST_PAY,
+    f_activate_channel,
+    f_service_code,
+    f_vasp_serv_id,
+    f_start_date,
+    f_end_date,
+    case 
+      when mnth=trunc(f_start_date, 'mm')
+        and MGD is null
+        then 1 
+        else null 
+          end as sell,
+    part_date
+from
+    (
+    Select 
+        idx, 
+        source, 
+        mnth,
+        s.sk_subs_id, 
+        s.subs_subs_id, 
+        MSISDN,
+        SERVICE,
+        SERVICE_ZONT,
+        partner, 
+        partner2, 
+        s.service_code, 
+        vasp_serv_id, 
+        activate_channel, 
+        cvm_channel,
+        UC_JOB_ID,
+        COMMUNICATION_ID,
+        RUN_ID,
+        COLLATERAL_ID,
+        COLLATERAL_VER,
+        start_date,
+        end_date,
+        mgd,
+        wmg,
+        coalesce(rev.event_dttm, revb.event_dttm) as event_dttm,
+        coalesce(rev.cost_less_vat, revb.cost_less_vat) as cost_less_vat,
+        MIN(COALESCE(rev.event_dttm, revb.event_dttm)) over (partition by source, idx, COALESCE(s.sk_subs_id, s.subs_subs_id), s.service_code, start_date) as MNTH_FIRST_PAY,
+        MIN(COALESCE(rev.event_dttm, revb.event_dttm)) over (partition by source, idx, COALESCE(s.sk_subs_id, s.subs_subs_id)) as F_MNTH_FIRST_PAY,
+        f_activate_channel,
+        f_service_code,
+        f_vasp_serv_id,
+        f_start_date,
+        f_end_date,
+        part_date
+    from 
+        (
+        select * 
+        from 
+               rep_b2b.sub_flow3 
+        Where part_date >= v_date and trunc(f_end_date, 'dd')>=trunc(sysdate, 'dd')-5
+        ) s
+    inner join
+        (
+        select distinct 
+               month_start_date as mnth 
+        from 
+               pub_ds.d_calendar
+        Where month_start_date = v_date --month_start_date between '01.01.2018' and trunc(sysdate, 'mm') 
+        ) c
+      on c.mnth>=trunc(s.start_date, 'mm') and c.mnth<=trunc(s.end_date, 'mm')
+    left join
+        (
+        select 
+            sk_subs_id, 
+            service_code, 
+            event_dttm, 
+            cost_less_vat 
+        from 
+            rep_b2b.is_vasp_snap 
+        Where typename in ('subscribe', 'prolong')
+        and cost_less_vat>0
+        and trunc(snap_date, 'mm') = v_date
+        ) rev
+      on s.sk_subs_id = rev.sk_subs_id and s.service_code = rev.service_code and rev.event_dttm between s.start_date and s.end_date and s.SOURCE = 'VASP' and trunc(rev.event_dttm, 'mm') = c.mnth
+    left join 
+        (
+        select 
+            call_date as event_dttm,
+            subs_subs_id,
+            service_code,
+            revenue as cost_less_vat
+        from 
+            rep_b2b.ash_bil_calls
+        Where revenue>0
+        and trunc(call_date, 'mm') = v_date
+        ) revb
+      on s.subs_subs_id = revb.subs_subs_id and s.service_code = revb.service_code and revb.event_dttm between trunc(s.start_date, 'dd') and trunc(s.end_date, 'dd') and s.SOURCE = 'BILLING' and trunc(revb.event_dttm, 'mm') = c.mnth
+    )
+Group by
+    idx,
+    SOURCE,
+    mnth,
+    sk_subs_id,
+    subs_subs_id,
+    msisdn,
+    service,
+    service_zont,
+    partner,
+    partner2,
+    service_code,
+    vasp_serv_id,
+    activate_channel,
+    cvm_channel,
+    UC_JOB_ID,
+    COMMUNICATION_ID,
+    RUN_ID,
+    COLLATERAL_ID,
+    COLLATERAL_VER,
+    start_date,
+    end_date,
+    mgd,
+    wmg,
+    MNTH_FIRST_PAY,
+    F_MNTH_FIRST_PAY,
+    f_activate_channel,
+    f_service_code,
+    f_vasp_serv_id,
+    f_start_date,
+    f_end_date,
+    case 
+      when mnth=trunc(f_start_date, 'mm')
+        and MGD is null
+        then 1 
+        else null 
+          end,
+    part_date
+;
+
+commit
+;
+
+v_date:= add_months(v_date, 1)
+;
+
+end loop
+;
+
+end
+;
